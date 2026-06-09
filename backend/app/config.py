@@ -66,12 +66,14 @@ class Settings(BaseSettings):
 
     trocr_model_name: str = Field(default="microsoft/trocr-base-handwritten")
     trocr_use_gpu: bool = Field(default=False)
+    preprocessing_steps: List[str] = Field(
+    default_factory = lambda: ["grayscale", "denoise", "threshold"])
 
     cors_allowed_origins: List[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
-    @field_validator("allowed_mime_types", "cors_allowed_origins", mode="before")
+    @field_validator("allowed_mime_types", "cors_allowed_origins", "preprocessing_steps", mode="before")
     @classmethod
     def parse_string_list(cls, value):
         if isinstance(value, str):

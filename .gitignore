@@ -31,3 +31,4 @@ frontend/build/
 # Project-specific
 backend/app/sample_data/cache/
 *.log
+backend/demo_*.png
