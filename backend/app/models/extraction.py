@@ -37,6 +37,7 @@ class ExtractionMetadata(BaseModel):
     preprocessing_applied: List[str] = Field(
         default_factory=list, description="Names of preprocessing steps applied"
     )
+    from_cache: bool = Field(default=False)
 
 
 class ExtractionResponse(BaseModel):

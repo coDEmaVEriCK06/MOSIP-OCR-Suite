@@ -61,6 +61,7 @@ class Settings(BaseSettings):
         ]
     )
 
+    cache_max_size: int = Field(default=128, ge=1)
     tesseract_cmd: str = Field(default="tesseract")
     tesseract_lang: str = Field(default="eng")
 

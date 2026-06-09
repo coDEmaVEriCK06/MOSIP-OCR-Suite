@@ -1,8 +1,5 @@
-"""OCR service: wraps Tesseract and PDF rasterization behind an async-safe interface.
-
-Each page is preprocessed (app.preprocessing.pipeline) before OCR; the combined
-text is then classified and mined for structured fields (app.extraction.analyzer)
-so a single call returns raw text, per-word data, and a document analysis.
+"""OCR service: async-safe Tesseract + PDF rasterization, with preprocessing,
+document analysis, and a SHA-256 result cache in front of the expensive work.
 """
 
 import io
@@ -14,17 +11,19 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.extraction.analyzer import analyze_document
 from app.models.common import BoundingBox
 from app.models.extraction import ExtractionMetadata, ExtractionResponse, Word
 from app.preprocessing.pipeline import preprocess
+from app.services.cache import ExtractionCache
+
+_cache = ExtractionCache(max_size=get_settings().cache_max_size)
 
 
 def _ocr_image(
     image: Image.Image, lang: str, page_number: int, steps: List[str]
 ) -> Tuple[List[Word], str, List[str]]:
-    """Preprocess then OCR a single image. Returns (words, page_text, applied_steps)."""
     processed, applied = preprocess(image, steps)
     data = pytesseract.image_to_data(
         processed, lang=lang, output_type=pytesseract.Output.DICT
@@ -64,7 +63,6 @@ def _ocr_image(
 def _extract_sync(
     contents: bytes, mime_type: str, lang: str, steps: List[str]
 ) -> Tuple[List[Word], str, int, List[str]]:
-    """Rasterize PDFs if needed, preprocess + OCR every page. Runs in a worker thread."""
     if mime_type == "application/pdf":
         images = convert_from_bytes(contents)
     else:
@@ -85,7 +83,16 @@ def _extract_sync(
 async def extract_text(
     contents: bytes, mime_type: str, settings: Settings
 ) -> ExtractionResponse:
-    """Async-safe OCR + document analysis. Blocking work runs in a worker thread."""
+    """Async-safe OCR + analysis, served from cache on a repeat upload."""
+    cache_key = ExtractionCache.key_for(
+        contents, settings.tesseract_lang, settings.preprocessing_steps
+    )
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached.model_copy(
+            update={"metadata": cached.metadata.model_copy(update={"from_cache": True})}
+        )
+
     pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
     start = time.perf_counter()
     words, full_text, page_count, applied_steps = await anyio.to_thread.run_sync(
@@ -97,9 +104,7 @@ async def extract_text(
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-    analysis = analyze_document(full_text)
-
-    return ExtractionResponse(
+    response = ExtractionResponse(
         text=full_text,
         words=words,
         metadata=ExtractionMetadata(
@@ -108,5 +113,7 @@ async def extract_text(
             processing_time_ms=elapsed_ms,
             preprocessing_applied=applied_steps,
         ),
-        analysis=analysis,
+        analysis=analyze_document(full_text),
     )
+    _cache.set(cache_key, response)
+    return response
