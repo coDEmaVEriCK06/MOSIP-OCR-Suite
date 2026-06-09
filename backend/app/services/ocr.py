@@ -1,9 +1,8 @@
 """OCR service: wraps Tesseract and PDF rasterization behind an async-safe interface.
 
-Tesseract is a blocking, CPU-bound subprocess; endpoints are async. The blocking
-work is offloaded to a worker thread via anyio.to_thread.run_sync. Each page is
-preprocessed (see app.preprocessing.pipeline) before OCR, and the applied steps
-are reported in the response metadata.
+Each page is preprocessed (app.preprocessing.pipeline) before OCR; the combined
+text is then classified and mined for structured fields (app.extraction.analyzer)
+so a single call returns raw text, per-word data, and a document analysis.
 """
 
 import io
@@ -16,6 +15,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 
 from app.config import Settings
+from app.extraction.analyzer import analyze_document
 from app.models.common import BoundingBox
 from app.models.extraction import ExtractionMetadata, ExtractionResponse, Word
 from app.preprocessing.pipeline import preprocess
@@ -77,7 +77,7 @@ def _extract_sync(
         words, page_text, applied = _ocr_image(image, lang, page_index, steps)
         all_words.extend(words)
         page_texts.append(page_text)
-        applied_steps = applied  # identical for every page
+        applied_steps = applied
 
     return all_words, "\n\n".join(page_texts), len(images), applied_steps
 
@@ -85,7 +85,7 @@ def _extract_sync(
 async def extract_text(
     contents: bytes, mime_type: str, settings: Settings
 ) -> ExtractionResponse:
-    """Async-safe OCR with preprocessing. Offloads blocking work to a worker thread."""
+    """Async-safe OCR + document analysis. Blocking work runs in a worker thread."""
     pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
     start = time.perf_counter()
     words, full_text, page_count, applied_steps = await anyio.to_thread.run_sync(
@@ -97,6 +97,8 @@ async def extract_text(
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
+    analysis = analyze_document(full_text)
+
     return ExtractionResponse(
         text=full_text,
         words=words,
@@ -106,4 +108,5 @@ async def extract_text(
             processing_time_ms=elapsed_ms,
             preprocessing_applied=applied_steps,
         ),
+        analysis=analysis,
     )
