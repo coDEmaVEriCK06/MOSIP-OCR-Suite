@@ -4,17 +4,15 @@ Classification is marker-based: each document type has keyword and
 format-pattern markers; the type with the most matched markers wins, and
 confidence scales with the match count. Field extraction uses type-aware
 regular expressions for ID numbers, shared patterns for date-of-birth and
-gender, and a heuristic name extractor that skips institutional headers.
-
-These are deterministic, explainable rules rather than an ML model — the right
-fit for well-structured identity documents with known formats: no training
-data, fully debuggable, and trivial to extend with new document types.
+gender, and a heuristic name extractor that skips institutional headers. The
+extracted fields are then structurally verified (app.verification.validators).
 """
 
 import re
 from typing import List, Optional, Tuple
 
 from app.models.analysis import DocumentAnalysis, DocumentType, ExtractedField
+from app.verification.validators import verify_document
 
 _KEYWORDS = {
     DocumentType.AADHAAR: ["aadhaar", "uidai", "unique identification", "government of india"],
@@ -55,12 +53,10 @@ def classify(text: str) -> Tuple[DocumentType, float, List[str]]:
 
 def _extract_name(text: str) -> Optional[str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    # Prefer an explicit "Name:" label.
     for ln in lines:
         m = _NAME_LABEL.match(ln)
         if m and m.group(1).strip():
             return m.group(1).strip()
-    # Fallback: first 2-4 word alphabetic line that is not an institutional header.
     for ln in lines:
         if any(b in ln.lower() for b in _NAME_BLOCKLIST):
             continue
@@ -103,11 +99,13 @@ def extract_fields(text: str, doc_type: DocumentType) -> List[ExtractedField]:
 
 
 def analyze_document(text: str) -> DocumentAnalysis:
-    """Classify the document and extract its structured fields."""
+    """Classify the document, extract its fields, and verify them structurally."""
     doc_type, confidence, markers = classify(text)
+    fields = extract_fields(text, doc_type)
     return DocumentAnalysis(
         document_type=doc_type,
         type_confidence=confidence,
         matched_markers=markers,
-        fields=extract_fields(text, doc_type),
+        fields=fields,
+        verification=verify_document(doc_type, fields),
     )
