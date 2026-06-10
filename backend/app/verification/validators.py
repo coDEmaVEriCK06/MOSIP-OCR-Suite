@@ -3,7 +3,8 @@
 Unlike the original project's "verification" (which merely compared two OCR
 passes against each other and proved nothing), these checks validate the data
 against the documents' real-world rules: the Aadhaar Verhoeff checksum, PAN and
-passport format structure, and date-of-birth plausibility.
+passport format structure, date-of-birth plausibility, and — for passports —
+full MRZ check-digit validation plus MRZ-versus-printed cross-consistency.
 """
 
 import re
@@ -16,8 +17,9 @@ from app.models.analysis import (
     FieldVerification,
     VerificationResult,
 )
+from app.verification.mrz import detect_mrz_lines, parse_td3
 
-# --- Verhoeff checksum tables (Aadhaar's 12th digit is a Verhoeff check digit) ---
+# --- Verhoeff checksum (used by Aadhaar's 12th digit) ---
 _D = [
     [0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
     [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
@@ -32,7 +34,6 @@ _P = [
 
 
 def verhoeff_valid(number: str) -> bool:
-    """Validate a 12-digit Aadhaar number against its Verhoeff check digit."""
     digits = [int(d) for d in number if d.isdigit()]
     if len(digits) != 12:
         return False
@@ -73,8 +74,25 @@ def dob_valid(dob: str) -> Tuple[bool, str]:
     return False, "not a recognizable date"
 
 
-def verify_document(doc_type: DocumentType, fields: List[ExtractedField]) -> VerificationResult:
-    """Run the appropriate structural checks for the document type and fields."""
+def _mrz_dob_tuple(yymmdd: str):
+    if len(yymmdd) != 6 or not yymmdd.isdigit():
+        return None
+    yy, mm, dd = int(yymmdd[0:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
+    pivot = datetime.now().year % 100
+    yyyy = 2000 + yy if yy <= pivot else 1900 + yy
+    return (yyyy, mm, dd)
+
+
+def _printed_dob_tuple(s: str):
+    m = re.match(r"(\d{2})[/-](\d{2})[/-](\d{4})", s.strip())
+    if not m:
+        return None
+    return (int(m.group(3)), int(m.group(2)), int(m.group(1)))
+
+
+def verify_document(
+    doc_type: DocumentType, fields: List[ExtractedField], text: str = ""
+) -> VerificationResult:
     fmap = {f.name: f.value for f in fields}
     checks: List[FieldVerification] = []
 
@@ -94,6 +112,24 @@ def verify_document(doc_type: DocumentType, fields: List[ExtractedField]) -> Ver
     if "date_of_birth" in fmap:
         ok, detail = dob_valid(fmap["date_of_birth"])
         checks.append(FieldVerification(field="date_of_birth", check="date_validity", passed=ok, detail=detail))
+
+    mrz = detect_mrz_lines(text)
+    if mrz:
+        parsed = parse_td3(mrz[0], mrz[1])
+        for name, ok in parsed["checks"].items():
+            checks.append(FieldVerification(
+                field=f"mrz_{name}", check="check_digit", passed=ok,
+                detail="MRZ check digit valid" if ok else "MRZ check digit invalid",
+            ))
+        printed = fmap.get("date_of_birth")
+        if printed:
+            pt, mt = _printed_dob_tuple(printed), _mrz_dob_tuple(parsed["fields"]["date_of_birth"])
+            if pt and mt:
+                ok = pt == mt
+                checks.append(FieldVerification(
+                    field="date_of_birth", check="mrz_vs_printed", passed=ok,
+                    detail="printed DOB agrees with MRZ" if ok else "printed DOB disagrees with MRZ",
+                ))
 
     is_valid = bool(checks) and all(c.passed for c in checks)
     return VerificationResult(is_valid=is_valid, checks=checks)

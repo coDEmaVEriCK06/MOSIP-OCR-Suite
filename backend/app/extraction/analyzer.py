@@ -107,5 +107,5 @@ def analyze_document(text: str) -> DocumentAnalysis:
         type_confidence=confidence,
         matched_markers=markers,
         fields=fields,
-        verification=verify_document(doc_type, fields),
+        verification=verify_document(doc_type, fields, text),
     )
