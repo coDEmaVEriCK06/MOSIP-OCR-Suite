@@ -47,3 +47,7 @@ class ExtractionResponse(BaseModel):
     words: List[Word] = Field(..., description="Per-word data with confidence and bboxes")
     metadata: ExtractionMetadata = Field(..., description="How the extraction was performed")
     analysis: DocumentAnalysis = Field(..., description="Document type and extracted fields")
+    pages: List[str] = Field(
+        default_factory=list,
+        description="Per-page preview images (data URLs) for multi-page PDFs",
+    )

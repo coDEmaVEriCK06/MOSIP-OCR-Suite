@@ -2,6 +2,7 @@
 document analysis, and a SHA-256 result cache in front of the expensive work.
 """
 
+import base64
 import io
 import time
 from typing import Dict, List, Tuple
@@ -61,9 +62,18 @@ def _ocr_image(
     return words, "\n".join(line_texts), applied
 
 
+def _page_preview(image: Image.Image) -> str:
+    """Encode a page as a JPEG data URL. The image keeps its OCR pixel space,
+    so the same bounding boxes line up over it in the browser."""
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=80)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return "data:image/jpeg;base64," + b64
+
+
 def _extract_sync(
     contents: bytes, mime_type: str, lang: str, steps: List[str], max_pages: int
-) -> Tuple[List[Word], str, int, List[str]]:
+) -> Tuple[List[Word], str, int, List[str], List[str]]:
     if mime_type == "application/pdf":
         # Bound work per request: a small PDF can still carry hundreds of pages,
         # and we OCR every one. Read the page count cheaply (no rasterization)
@@ -76,19 +86,26 @@ def _extract_sync(
                 details={"pages": n_pages, "max_pages": max_pages},
             )
         images = convert_from_bytes(contents)
+        is_pdf = True
     else:
         images = [Image.open(io.BytesIO(contents))]
+        is_pdf = False
 
     all_words: List[Word] = []
     page_texts: List[str] = []
     applied_steps: List[str] = []
+    pages: List[str] = []
     for page_index, image in enumerate(images, start=1):
         words, page_text, applied = _ocr_image(image, lang, page_index, steps)
         all_words.extend(words)
         page_texts.append(page_text)
         applied_steps = applied
+        # Page previews are only needed for PDFs; for image uploads the browser
+        # already has the original file to display.
+        if is_pdf:
+            pages.append(_page_preview(image))
 
-    return all_words, "\n\n".join(page_texts), len(images), applied_steps
+    return all_words, "\n\n".join(page_texts), len(images), applied_steps, pages
 
 
 async def extract_text(
@@ -106,7 +123,7 @@ async def extract_text(
 
     pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
     start = time.perf_counter()
-    words, full_text, page_count, applied_steps = await anyio.to_thread.run_sync(
+    words, full_text, page_count, applied_steps, pages = await anyio.to_thread.run_sync(
         _extract_sync,
         contents,
         mime_type,
@@ -126,6 +143,7 @@ async def extract_text(
             preprocessing_applied=applied_steps,
         ),
         analysis=analyze_document(full_text, words),
+        pages=pages,
     )
     _cache.set(cache_key, response)
     return response

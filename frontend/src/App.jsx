@@ -32,6 +32,18 @@ export default function App() {
 
   const pick = () => inputRef.current?.click();
 
+  const exportJson = () => {
+    if (!result) return;
+    const { pages, ...data } = result;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "extraction.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="app">
       <header className="appbar">
@@ -43,6 +55,9 @@ export default function App() {
           </div>
         </div>
         <div className="appbar-actions">
+          {status === "done" && (
+            <button className="btn-ghost" onClick={exportJson}>Export JSON</button>
+          )}
           <button className="btn-primary" onClick={pick}>Upload document</button>
           <input
             ref={inputRef}
@@ -62,6 +77,7 @@ export default function App() {
         <DocumentCanvas
           upload={upload}
           words={result?.words}
+          pages={result?.pages}
           highlight={hovered}
           status={status}
           onPick={pick}
