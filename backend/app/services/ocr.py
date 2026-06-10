@@ -113,7 +113,7 @@ async def extract_text(
             processing_time_ms=elapsed_ms,
             preprocessing_applied=applied_steps,
         ),
-        analysis=analyze_document(full_text),
+        analysis=analyze_document(full_text, words),
     )
     _cache.set(cache_key, response)
     return response
