@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
 
     max_file_size_mb: int = Field(default=10, ge=1, le=100)
+    max_pages: int = Field(default=15, ge=1, le=200)
     allowed_mime_types: List[str] = Field(
         default_factory=lambda: [
             "image/jpeg",
@@ -65,8 +66,6 @@ class Settings(BaseSettings):
     tesseract_cmd: str = Field(default="tesseract")
     tesseract_lang: str = Field(default="eng")
 
-    trocr_model_name: str = Field(default="microsoft/trocr-base-handwritten")
-    trocr_use_gpu: bool = Field(default=False)
     preprocessing_steps: List[str] = Field(
     default_factory = lambda: ["grayscale", "denoise", "threshold"])
 

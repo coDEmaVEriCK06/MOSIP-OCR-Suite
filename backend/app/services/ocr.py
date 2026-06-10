@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 
 import anyio
 import pytesseract
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_bytes, pdfinfo_from_bytes
 from PIL import Image
 
 from app.config import Settings, get_settings
@@ -17,6 +17,7 @@ from app.models.common import BoundingBox
 from app.models.extraction import ExtractionMetadata, ExtractionResponse, Word
 from app.preprocessing.pipeline import preprocess
 from app.services.cache import ExtractionCache
+from app.utils.files import FileValidationError
 
 _cache = ExtractionCache(max_size=get_settings().cache_max_size)
 
@@ -61,9 +62,19 @@ def _ocr_image(
 
 
 def _extract_sync(
-    contents: bytes, mime_type: str, lang: str, steps: List[str]
+    contents: bytes, mime_type: str, lang: str, steps: List[str], max_pages: int
 ) -> Tuple[List[Word], str, int, List[str]]:
     if mime_type == "application/pdf":
+        # Bound work per request: a small PDF can still carry hundreds of pages,
+        # and we OCR every one. Read the page count cheaply (no rasterization)
+        # and reject oversized documents before the expensive conversion.
+        n_pages = int(pdfinfo_from_bytes(contents).get("Pages", 0))
+        if n_pages > max_pages:
+            raise FileValidationError(
+                error_type="too_many_pages",
+                message=f"PDF has {n_pages} pages; the maximum is {max_pages}.",
+                details={"pages": n_pages, "max_pages": max_pages},
+            )
         images = convert_from_bytes(contents)
     else:
         images = [Image.open(io.BytesIO(contents))]
@@ -101,6 +112,7 @@ async def extract_text(
         mime_type,
         settings.tesseract_lang,
         settings.preprocessing_steps,
+        settings.max_pages,
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 

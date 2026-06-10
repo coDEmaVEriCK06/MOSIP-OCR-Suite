@@ -36,3 +36,30 @@ def test_extract_rejects_disguised_script(client):
     r = client.post("/api/extract", files={"file": ("evil.png", script, "image/png")})
     assert r.status_code == 400
     assert r.json()["error_type"] == "unrecognized_file_type"
+
+def test_extract_returns_populated_analysis(client, make_text_image):
+    png = make_text_image(
+        "Permanent Account Number\nABCDE1234F\nName\nHRISHABH SHARMA",
+        width=520,
+        height=280,
+    )
+    r = client.post("/api/extract", files={"file": ("pan.png", png, "image/png")})
+    assert r.status_code == 200
+    analysis = r.json()["analysis"]
+    assert analysis["document_type"] == "pan"
+    fields = {f["name"]: f["value"] for f in analysis["fields"]}
+    assert fields.get("pan_number") == "ABCDE1234F"
+
+
+def test_extract_rejects_pdf_with_too_many_pages(client):
+    import io
+    from PIL import Image
+
+    pages = [Image.new("RGB", (120, 160), "white") for _ in range(16)]
+    buf = io.BytesIO()
+    pages[0].save(buf, format="PDF", save_all=True, append_images=pages[1:])
+    r = client.post(
+        "/api/extract", files={"file": ("big.pdf", buf.getvalue(), "application/pdf")}
+    )
+    assert r.status_code == 400
+    assert r.json()["error_type"] == "too_many_pages"
