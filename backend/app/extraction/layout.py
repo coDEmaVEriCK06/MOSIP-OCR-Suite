@@ -9,13 +9,12 @@ on the line below, as real PAN/passport cards are printed).
 This is the line that separates document understanding from regex on a
 flattened blob: on an identity card, geometry carries meaning, so we use it.
 Pattern-based fields (ID numbers, dates) are still better handled by regex on
-the line text — a distinctive format is the right signal there — so this
-module deliberately covers only the label-anchored fields (name, father's
-name, etc.) where position is what disambiguates the value.
+the line text — a distinctive format is the right signal there.
 """
 
 from typing import List, Optional, Sequence
 
+from app.models.common import BoundingBox
 from app.models.extraction import Word
 
 
@@ -68,28 +67,21 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
 
-_NOISE_TOKENS = {"", ":", "-", "|", "/"}
+def _has_alnum(s: str) -> bool:
+    return any(ch.isalnum() for ch in s)
 
 
-def _clean_value(tokens: List[str]) -> Optional[str]:
-    parts = []
-    for t in tokens:
-        t = t.strip().lstrip(":").strip()
-        if t and t not in _NOISE_TOKENS:
-            parts.append(t)
-    value = " ".join(parts).strip()
-    return value or None
-
-
-def find_label_value(
+def value_words_for_label(
     lines: List[Line],
     label_variants: Sequence[str],
     max_label_words: int = 3,
-) -> Optional[str]:
-    """Find a label by text, then return its value to the right or just below.
+) -> Optional[List[Word]]:
+    """Find a label, then return the value's source Word objects (with geometry).
 
     Tries inline first (value on the same line, right of the label), then
     stacked (value on the next line, horizontally aligned under the label).
+    Returns the words that make up the value, so callers keep both the text
+    and the exact bounding boxes it came from.
     """
     variants = {_norm(v) for v in label_variants}
     for i, line in enumerate(lines):
@@ -105,19 +97,48 @@ def find_label_value(
             label_x_end = max(t.bbox.x + t.bbox.width for t in label_words)
 
             # Inline: words on the same line, to the right of the label.
-            right = [t for t in toks[span:] if t.bbox.x >= label_x_end - 3]
-            value = _clean_value([t.text for t in right])
-            if value:
-                return value
+            right = [
+                t for t in toks[span:]
+                if t.bbox.x >= label_x_end - 3 and _has_alnum(t.text)
+            ]
+            if right:
+                return right
 
             # Stacked: next line, horizontally aligned under the label.
             if i + 1 < len(lines):
                 below = lines[i + 1]
                 aligned = [
-                    t for t in below.words if t.bbox.x + t.bbox.width >= label_x_start - 8
+                    t for t in below.words
+                    if t.bbox.x + t.bbox.width >= label_x_start - 8 and _has_alnum(t.text)
                 ]
-                value = _clean_value([t.text for t in aligned])
-                if value:
-                    return value
+                if aligned:
+                    return aligned
             break  # label matched at start; move to the next line
     return None
+
+
+def find_label_value(
+    lines: List[Line],
+    label_variants: Sequence[str],
+    max_label_words: int = 3,
+) -> Optional[str]:
+    """Text-only convenience wrapper over value_words_for_label."""
+    words = value_words_for_label(lines, label_variants, max_label_words)
+    if not words:
+        return None
+    value = " ".join(w.text for w in words).strip(": ").strip()
+    return value or None
+
+
+def locate_value_boxes(value: str, words: Sequence[Word]) -> List[BoundingBox]:
+    """Best-effort reverse lookup: which word boxes make up this value.
+
+    Used for pattern-extracted fields (ID numbers, dates, gender) where the
+    value came from regex on the text blob rather than from specific words.
+    Matches whole OCR tokens (length >= 3) whose normalized text appears in
+    the normalized value, which handles spaced IDs like "2341 2341 2346".
+    """
+    nv = _norm(value)
+    if not nv:
+        return []
+    return [w.bbox for w in words if len(_norm(w.text)) >= 3 and _norm(w.text) in nv]

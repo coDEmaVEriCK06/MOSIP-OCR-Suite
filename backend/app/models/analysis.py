@@ -5,6 +5,8 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.models.common import BoundingBox
+
 
 class DocumentType(str, Enum):
     AADHAAR = "aadhaar"
@@ -17,6 +19,10 @@ class ExtractedField(BaseModel):
     name: str = Field(..., description="Field identifier, e.g. 'date_of_birth'")
     value: str = Field(..., min_length=1)
     confidence: float = Field(..., ge=0.0, le=100.0)
+    boxes: List[BoundingBox] = Field(
+        default_factory=list,
+        description="Source word boxes on the document that this value came from",
+    )
 
 
 class FieldVerification(BaseModel):

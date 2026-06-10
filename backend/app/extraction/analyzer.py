@@ -1,14 +1,11 @@
 """Document classification and structured field extraction from OCR text.
 
 Classification is marker-based: each document type has a set of keyword and
-format-pattern markers; the type with the most matched markers wins, and
-confidence scales with the match count. Field extraction is hybrid: distinctive
-pattern fields (ID numbers, date of birth, gender) use type-aware regular
-expressions, while label-anchored fields (name, father's name) use spatial
-layout analysis over word bounding boxes when geometry is available, falling
-back to a text heuristic otherwise. These are deterministic, explainable rules
-rather than an ML model — appropriate for well-structured ID documents and easy
-to defend and extend.
+format-pattern markers; the type with the most matched markers wins. Field
+extraction is hybrid: spatial layout analysis for label-anchored fields (name,
+father's name) and type-aware regexes for pattern fields (ID numbers, DOB,
+gender). Every field also records the source word boxes it came from, so a
+value is traceable to its exact location on the document.
 """
 
 import re
@@ -16,7 +13,11 @@ from typing import List, Optional, Sequence, Tuple
 
 from app.models.analysis import DocumentAnalysis, DocumentType, ExtractedField
 from app.models.extraction import Word
-from app.extraction.layout import find_label_value, reconstruct_lines
+from app.extraction.layout import (
+    locate_value_boxes,
+    reconstruct_lines,
+    value_words_for_label,
+)
 from app.verification.validators import verify_document
 
 _KEYWORDS = {
@@ -65,8 +66,6 @@ def _extract_name(text: str) -> Optional[str]:
         m = _NAME_LABEL.match(ln)
         if m and m.group(1).strip():
             return m.group(1).strip()
-    # Fallback: first line of 2-4 alphabetic words that is not an institutional
-    # header (those are filtered by the blocklist).
     for ln in lines:
         low = ln.lower()
         if any(b in low for b in _NAME_BLOCKLIST):
@@ -83,46 +82,73 @@ def extract_fields(
     fields: List[ExtractedField] = []
 
     # Label-value fields use spatial layout analysis when word geometry is
-    # available (the position of a value relative to its label is what
-    # identifies it); we fall back to the text heuristic otherwise.
+    # available; pattern fields use regex. Each field records the source word
+    # boxes it came from, so the UI can trace a value to its place on the doc.
     lines = reconstruct_lines(words) if words else None
+    word_list = list(words) if words else []
 
     name = None
     name_conf = 60.0
+    name_boxes: List = []
     if lines is not None:
-        name = find_label_value(lines, ["name"])
-        if name:
+        value_words = value_words_for_label(lines, ["name"])
+        if value_words:
+            name = " ".join(w.text for w in value_words).strip(": ").strip()
             name_conf = 75.0
+            name_boxes = [w.bbox for w in value_words]
     if not name:
         name = _extract_name(text)
+        if name and word_list:
+            name_boxes = locate_value_boxes(name, word_list)
     if name:
-        fields.append(ExtractedField(name="name", value=name, confidence=name_conf))
+        fields.append(ExtractedField(name="name", value=name, confidence=name_conf, boxes=name_boxes))
 
     if lines is not None and doc_type in (DocumentType.PAN, DocumentType.PASSPORT):
-        father = find_label_value(lines, ["father's name", "fathers name", "father"])
-        if father:
-            fields.append(ExtractedField(name="father_name", value=father, confidence=70.0))
+        value_words = value_words_for_label(lines, ["father's name", "fathers name", "father"])
+        if value_words:
+            father = " ".join(w.text for w in value_words).strip(": ").strip()
+            fields.append(ExtractedField(
+                name="father_name", value=father, confidence=70.0,
+                boxes=[w.bbox for w in value_words],
+            ))
 
     dob = _DOB.search(text)
     if dob:
-        fields.append(ExtractedField(name="date_of_birth", value=dob.group(1), confidence=90.0))
+        fields.append(ExtractedField(
+            name="date_of_birth", value=dob.group(1), confidence=90.0,
+            boxes=locate_value_boxes(dob.group(1), word_list),
+        ))
 
     gender = _GENDER.search(text)
     if gender:
-        fields.append(ExtractedField(name="gender", value=gender.group(1).title(), confidence=85.0))
+        value = gender.group(1).title()
+        fields.append(ExtractedField(
+            name="gender", value=value, confidence=85.0,
+            boxes=locate_value_boxes(value, word_list),
+        ))
 
     if doc_type == DocumentType.AADHAAR:
         m = _AADHAAR_NUMBER.search(text)
         if m:
-            fields.append(ExtractedField(name="aadhaar_number", value=re.sub(r"\s+", "", m.group(1)), confidence=95.0))
+            value = re.sub(r"\s+", "", m.group(1))
+            fields.append(ExtractedField(
+                name="aadhaar_number", value=value, confidence=95.0,
+                boxes=locate_value_boxes(m.group(1), word_list),
+            ))
     elif doc_type == DocumentType.PAN:
         m = _PAN_NUMBER.search(text)
         if m:
-            fields.append(ExtractedField(name="pan_number", value=m.group(1), confidence=95.0))
+            fields.append(ExtractedField(
+                name="pan_number", value=m.group(1), confidence=95.0,
+                boxes=locate_value_boxes(m.group(1), word_list),
+            ))
     elif doc_type == DocumentType.PASSPORT:
         m = _PASSPORT_NUMBER.search(text)
         if m:
-            fields.append(ExtractedField(name="passport_number", value=m.group(1), confidence=95.0))
+            fields.append(ExtractedField(
+                name="passport_number", value=m.group(1), confidence=95.0,
+                boxes=locate_value_boxes(m.group(1), word_list),
+            ))
 
     return fields
 
