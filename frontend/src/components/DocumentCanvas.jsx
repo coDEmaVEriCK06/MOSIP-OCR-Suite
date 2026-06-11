@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 function confTier(c) {
   if (c >= 90) return "hi";
@@ -12,8 +12,6 @@ export default function DocumentCanvas({ upload, words, pages, highlight, status
   const [dims, setDims] = useState(null);
   const [showBoxes, setShowBoxes] = useState(true);
   const [page, setPage] = useState(0);
-
-  useEffect(() => { setPage(0); }, [upload?.url]);
 
   if (!upload) {
     return (

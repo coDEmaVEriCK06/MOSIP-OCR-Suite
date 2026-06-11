@@ -34,7 +34,8 @@ export default function App() {
 
   const exportJson = () => {
     if (!result) return;
-    const { pages, ...data } = result;
+    const data = { ...result };
+    delete data.pages; // omit the heavy page-preview images
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -75,6 +76,7 @@ export default function App() {
         onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files?.[0]); }}
       >
         <DocumentCanvas
+          key={upload?.url || "none"}
           upload={upload}
           words={result?.words}
           pages={result?.pages}
