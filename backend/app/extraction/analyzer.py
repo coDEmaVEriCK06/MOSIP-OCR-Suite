@@ -6,6 +6,14 @@ extraction is hybrid: spatial layout analysis for label-anchored fields (name,
 father's name) and type-aware regexes for pattern fields (ID numbers, DOB,
 gender). Every field also records the source word boxes it came from, so a
 value is traceable to its exact location on the document.
+
+For passports specifically, the machine-readable zone (MRZ) is preferred as the
+source of the structured fields (date of birth, number, sex) whenever it parses
+and its ICAO check digit validates. The MRZ is printed to be machine-read and is
+self-validating, so when it is readable it is more trustworthy than scraping the
+printed labels — which is exactly the case where a printed-text regex can grab
+the wrong date (e.g. the date of issue) on a document that carries several dates.
+When no valid MRZ is available, extraction falls back to the printed-text regex.
 """
 
 import re
@@ -18,6 +26,7 @@ from app.extraction.layout import (
     reconstruct_lines,
     value_words_for_label,
 )
+from app.verification.mrz import detect_mrz_lines, parse_td3
 from app.verification.validators import verify_document
 
 _KEYWORDS = {
@@ -76,6 +85,33 @@ def _extract_name(text: str) -> Optional[str]:
     return None
 
 
+def _mrz_date_to_display(yymmdd: str, current_year: int = 2026) -> Optional[str]:
+    """Convert an MRZ ``YYMMDD`` date to ``dd/mm/yyyy``, applying a century pivot.
+
+    The MRZ stores the year as two digits with no century. A birth date cannot be
+    in the future, so a two-digit year that would land after the current year is
+    read as 19YY rather than 20YY (e.g. ``86`` -> 1986, ``05`` -> 2005). Returns
+    ``None`` if the token isn't a plausible YYMMDD.
+    """
+    if len(yymmdd) != 6 or not yymmdd.isdigit():
+        return None
+    yy, mm, dd = int(yymmdd[0:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
+    if not (1 <= mm <= 12 and 1 <= dd <= 31):
+        return None
+    year = 2000 + yy
+    if year > current_year:
+        year -= 100
+    return f"{dd:02d}/{mm:02d}/{year:04d}"
+
+
+def _parse_passport_mrz(text: str) -> Optional[dict]:
+    """Return the parsed MRZ for a passport, or None if no MRZ is present."""
+    found = detect_mrz_lines(text)
+    if not found:
+        return None
+    return parse_td3(found[0], found[1])
+
+
 def extract_fields(
     text: str, doc_type: DocumentType, words: Optional[Sequence[Word]] = None
 ) -> List[ExtractedField]:
@@ -86,6 +122,11 @@ def extract_fields(
     # boxes it came from, so the UI can trace a value to its place on the doc.
     lines = reconstruct_lines(words) if words else None
     word_list = list(words) if words else []
+
+    # For passports, parse the MRZ once up front. When a field's ICAO check digit
+    # validates, the MRZ value is authoritative and overrides the printed-text
+    # regex below; otherwise we fall back to the printed text.
+    mrz = _parse_passport_mrz(text) if doc_type == DocumentType.PASSPORT else None
 
     name = None
     name_conf = 60.0
@@ -112,20 +153,43 @@ def extract_fields(
                 boxes=[w.bbox for w in value_words],
             ))
 
-    dob = _DOB.search(text)
-    if dob:
-        fields.append(ExtractedField(
-            name="date_of_birth", value=dob.group(1), confidence=90.0,
-            boxes=locate_value_boxes(dob.group(1), word_list),
-        ))
+    # Date of birth: prefer the MRZ when its check digit validates.
+    dob_field: Optional[ExtractedField] = None
+    if mrz and mrz["checks"].get("date_of_birth"):
+        display = _mrz_date_to_display(mrz["fields"]["date_of_birth"])
+        if display:
+            dob_field = ExtractedField(
+                name="date_of_birth", value=display, confidence=98.0,
+                boxes=locate_value_boxes(mrz["fields"]["date_of_birth"], word_list),
+            )
+    if dob_field is None:
+        m = _DOB.search(text)
+        if m:
+            dob_field = ExtractedField(
+                name="date_of_birth", value=m.group(1), confidence=90.0,
+                boxes=locate_value_boxes(m.group(1), word_list),
+            )
+    if dob_field:
+        fields.append(dob_field)
 
-    gender = _GENDER.search(text)
-    if gender:
-        value = gender.group(1).title()
-        fields.append(ExtractedField(
-            name="gender", value=value, confidence=85.0,
-            boxes=locate_value_boxes(value, word_list),
-        ))
+    # Sex/gender: prefer the MRZ's M/F when present (it is part of the
+    # check-digit-protected line); otherwise fall back to the printed regex.
+    gender_field: Optional[ExtractedField] = None
+    if mrz and mrz["fields"].get("sex") in ("M", "F"):
+        gender_field = ExtractedField(
+            name="gender", value="Male" if mrz["fields"]["sex"] == "M" else "Female",
+            confidence=95.0, boxes=[],
+        )
+    if gender_field is None:
+        g = _GENDER.search(text)
+        if g:
+            value = g.group(1).title()
+            gender_field = ExtractedField(
+                name="gender", value=value, confidence=85.0,
+                boxes=locate_value_boxes(value, word_list),
+            )
+    if gender_field:
+        fields.append(gender_field)
 
     if doc_type == DocumentType.AADHAAR:
         m = _AADHAAR_NUMBER.search(text)
@@ -143,12 +207,23 @@ def extract_fields(
                 boxes=locate_value_boxes(m.group(1), word_list),
             ))
     elif doc_type == DocumentType.PASSPORT:
-        m = _PASSPORT_NUMBER.search(text)
-        if m:
-            fields.append(ExtractedField(
-                name="passport_number", value=m.group(1), confidence=95.0,
-                boxes=locate_value_boxes(m.group(1), word_list),
-            ))
+        # Passport number: prefer the MRZ when its check digit validates.
+        number_field: Optional[ExtractedField] = None
+        if mrz and mrz["checks"].get("passport_number") and mrz["fields"]["passport_number"]:
+            num = mrz["fields"]["passport_number"]
+            number_field = ExtractedField(
+                name="passport_number", value=num, confidence=98.0,
+                boxes=locate_value_boxes(num, word_list),
+            )
+        if number_field is None:
+            m = _PASSPORT_NUMBER.search(text)
+            if m:
+                number_field = ExtractedField(
+                    name="passport_number", value=m.group(1), confidence=95.0,
+                    boxes=locate_value_boxes(m.group(1), word_list),
+                )
+        if number_field:
+            fields.append(number_field)
 
     return fields
 
