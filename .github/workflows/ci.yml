@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils fonts-dejavu-core
       - name: Install Python dependencies
         run: pip install -r requirements.txt
       - name: Run tests
